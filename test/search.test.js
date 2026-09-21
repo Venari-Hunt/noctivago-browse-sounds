@@ -15,10 +15,24 @@ test('formatDuration shows m:ss', () => {
   assert.equal(formatDuration(undefined), '0:00')
 })
 
-test('cleanErrorMessage strips the IPC wrapper and keeps the first sentence', () => {
+test('cleanErrorMessage strips the IPC wrapper and keeps one sentence', () => {
   const err = new Error("Error invoking remote method 'freesound:search': Error: Rate limited. Try later")
-  assert.equal(cleanErrorMessage(err, 'x'), 'Rate limited')
+  assert.equal(cleanErrorMessage(err, 'x'), 'Rate limited.')
   assert.equal(cleanErrorMessage(null, 'Search failed'), 'Search failed')
+})
+
+// The regression this function existed to cause: it used to cut at the
+// first '(' too, so every import failure read the same.
+test('cleanErrorMessage keeps the real reason behind a parenthesis', () => {
+  const err = new Error("Couldn't download that link: That's a live stream, so there's no recording to import yet.")
+  assert.match(cleanErrorMessage(err, 'x'), /live stream/)
+  const legacy = new Error('Failed (direct download), and yt-dlp also failed: video is unavailable')
+  assert.match(cleanErrorMessage(legacy, 'x'), /video is unavailable/)
+})
+
+test('cleanErrorMessage drops a multi-line tail', () => {
+  const err = new Error(['Short reason.', 'ffmpeg noise here'].join(String.fromCharCode(10)))
+  assert.equal(cleanErrorMessage(err, 'x'), 'Short reason.')
 })
 
 test('freshSourceState starts enabled with no pages loaded', () => {

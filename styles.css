@@ -289,3 +289,52 @@
   flex-shrink: 0;
   width: 90px;
 }
+
+/* Settings → Browse Sounds (this plugin's own page). Shapes echo the app's
+   own settings rows so the page doesn't look like a different product. */
+.browse-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.browse-setting {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.browse-setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.browse-setting-name {
+  font-weight: 600;
+}
+
+.browse-setting-desc {
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.45;
+}
+
+.browse-setting-checks {
+  display: flex;
+  gap: 14px;
+  white-space: nowrap;
+}
+
+.browse-setting-checks label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Replaces the Import button for as long as that card's download runs. */
+.browse-cancel-btn {
+  white-space: nowrap;
+}

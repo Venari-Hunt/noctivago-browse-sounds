@@ -1,9 +1,9 @@
 {
   "id": "browse-sounds",
   "name": "Browse Sounds",
-  "version": "1.0.0",
-  "minAppVersion": "0.1.234",
-  "description": "Search and import ambient sounds from Freesound.org, with richer results and infinite scroll (more sources planned).",
+  "version": "1.1.0",
+  "minAppVersion": "0.1.239",
+  "description": "Search and import ambient sounds from Freesound.org and YouTube, with progress you can watch and stop.",
   "author": "Noctívago",
   "main": "main.js",
   "styles": "styles.css"

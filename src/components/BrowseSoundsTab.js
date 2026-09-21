@@ -41,7 +41,9 @@
 // surface a plugin needs (see PluginLoader.js: app.noctivago is
 // window.noctivago handed through wholesale).
 
-import { SORT_OPTIONS, FREESOUND_PAGE_SIZE, YOUTUBE_PAGE_SIZE, MAX_TAGS_SHOWN, YOUTUBE_DEFAULT_MAX_SECONDS, SOURCE_KEYS, licenseLabel, formatDuration, cleanErrorMessage, freshSourceState } from '../domain/search.js'
+import { SORT_OPTIONS, FREESOUND_PAGE_SIZE, YOUTUBE_PAGE_SIZE, MAX_TAGS_SHOWN, SOURCE_KEYS, licenseLabel, formatDuration, cleanErrorMessage, freshSourceState } from '../domain/search.js'
+import { readSettings, writeSettings, maxMinutesLabel, estimateImportWait } from '../domain/settings.js'
+import { createSettingsPage } from './SettingsPage.js'
 import { PLAY_ICON_SVG, PAUSE_ICON_SVG, LINK_ICON_SVG } from './icons.js'
 
 export default class BrowseSoundsPlugin {
@@ -69,6 +71,12 @@ export default class BrowseSoundsPlugin {
     // shown twice" doesn't slip through infinite scroll.
     this.seenYoutubeIds = new Set()
     this.youtubeImporting = false
+    // The card whose import is running, so a second click can point at it
+    // instead of doing nothing, and so Cancel knows what to put back.
+    this.importingCard = null
+    // This plugin's own saved options (src/domain/settings.js), kept here so
+    // every import reads one value rather than a hard-coded constant.
+    this.settings = readSettings()
   }
 
   async onload() {
@@ -79,18 +87,58 @@ export default class BrowseSoundsPlugin {
       mountSticky: (container) => this.mountSticky(container),
       onHide: () => this.stopPreview()
     })
+    // A plugin's options belong to the plugin, not to the app's own Settings
+    // → Library page (owner feedback, 2026-09-20).
+    this.unregisterSettings = this.app.settings.addPage(
+      createSettingsPage({
+        api: this.api,
+        getSettings: () => this.settings,
+        setSettings: (patch) => this.updateSettings(patch)
+      })
+    )
   }
 
   async onunload() {
     this.stopPreview()
     this.observer?.disconnect()
+    this.unregisterSettings?.()
     this.unregister?.()
+  }
+
+  // Never unload mid-import: a YouTube download can run for minutes and
+  // tearing the tab down under it would lose the work with no explanation.
+  isBusy() {
+    return this.youtubeImporting
+  }
+
+  updateSettings(patch) {
+    this.settings = writeSettings({ ...this.settings, ...patch })
+    this.describeImportLength()
+    return this.settings
+  }
+
+  // The cap an import asks for, in seconds. 0 means "the whole video".
+  importMaxSeconds() {
+    return this.settings.maxMinutes > 0 ? this.settings.maxMinutes * 60 : 0
+  }
+
+  // Says up front what a YouTube import will take. The wait is the whole
+  // reason importing from YouTube felt broken: YouTube throttles long
+  // uploads to roughly playback speed, so the old fixed 10-minute cap meant
+  // about five minutes of apparently nothing happening.
+  describeImportLength() {
+    if (!this.els.lengthHint) return
+    const { maxMinutes } = this.settings
+    this.els.lengthHint.textContent =
+      `YouTube imports download ${maxMinutesLabel(maxMinutes).toLowerCase()} of a video — ${estimateImportWait(maxMinutes)}, ` +
+      'because YouTube caps the speed on long videos. Change it in Settings → Browse Sounds.'
   }
 
   mount(container) {
     container.innerHTML = `
       <div class="browse-tab">
-        <p class="browse-hint">Search and import ambient sounds from Freesound.org and YouTube straight into your library. Freesound downloads only the compressed preview (not the original file) — attribution is kept automatically for licenses that require it. YouTube results download through the same tool "Add from link" already uses, capped at 10 minutes.</p>
+        <p class="browse-hint">Search and import ambient sounds from Freesound.org and YouTube straight into your library. Freesound downloads only the compressed preview (not the original file) — attribution is kept automatically for licenses that require it.</p>
+        <p class="browse-hint" id="browse-length-hint"></p>
 
         <div class="browse-search-row">
           <input id="browse-query" type="text" placeholder="rain, wind, birds…" autocomplete="off" />
@@ -118,10 +166,13 @@ export default class BrowseSoundsPlugin {
       searchBtn: container.querySelector('#browse-search-btn'),
       sourceToggles: { freesound: container.querySelector('#browse-source-freesound'), youtube: container.querySelector('#browse-source-youtube') },
       unavailable: container.querySelector('#browse-unavailable'),
+      lengthHint: container.querySelector('#browse-length-hint'),
       status: container.querySelector('#browse-status'),
       results: container.querySelector('#browse-results'),
       sentinel: container.querySelector('#browse-sentinel')
     }
+
+    this.describeImportLength()
 
     this.els.searchBtn.addEventListener('click', () => this.search())
     this.els.query.addEventListener('keydown', (evt) => {
@@ -315,7 +366,13 @@ export default class BrowseSoundsPlugin {
       if (!this.sources[key].available) {
         toggle.checked = false
         this.sources[key].enabled = false
+        continue
       }
+      // Which sources start on is a saved preference (Settings → Browse
+      // Sounds); the toggles above the results still override it per search.
+      const enabled = key === 'freesound' ? this.settings.freesoundEnabled : this.settings.youtubeEnabled
+      toggle.checked = enabled
+      this.sources[key].enabled = enabled
     }
     if (anyAvailable) this.els.query.focus()
   }
@@ -522,17 +579,33 @@ export default class BrowseSoundsPlugin {
   // one is in flight; Freesound imports are unaffected since they use a
   // separate channel and finish fast enough to not need this guard.
   async importYouTubeResult(sound, card) {
-    if (this.youtubeImporting) return
+    // A second click used to hit `if (importing) return` and do nothing at
+    // all - no message, no disabled button on cards loaded since the import
+    // started. Say what's happening and point at the card that's busy.
+    if (this.youtubeImporting) {
+      const status = card.querySelector('.browse-card-status')
+      status.textContent = 'Another import is running — one at a time.'
+      this.importingCard?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      return
+    }
     this.youtubeImporting = true
+    this.importingCard = card
     const importBtn = card.querySelector('.browse-import-btn')
     const status = card.querySelector('.browse-card-status')
     const otherYoutubeButtons = this.els.results.querySelectorAll('[data-source="youtube"] .browse-import-btn')
     for (const btn of otherYoutubeButtons) btn.disabled = true
-    status.textContent = 'Starting…'
+    status.textContent = `Starting… (${maxMinutesLabel(this.settings.maxMinutes).toLowerCase()}, ${estimateImportWait(this.settings.maxMinutes)})`
+
+    // A download that runs for minutes has to be interruptible, so the
+    // Import button becomes Cancel for as long as this one runs.
+    const cancelBtn = this.showCancelButton(card, importBtn)
 
     const unsubscribe = this.api.library.onAddSoundFromUrlProgress((update) => {
       if (!update) return
       if (update.type === 'progress') {
+        // The app now reports a real percent for the whole download (it used
+        // to jump straight from nothing to 100% at the very end), so this
+        // line actually moves while a long video comes down.
         status.textContent = `Downloading… ${Math.round(update.percent)}%`
       } else if (update.message) {
         status.textContent = update.message
@@ -540,19 +613,42 @@ export default class BrowseSoundsPlugin {
     })
 
     try {
-      await this.api.library.addSoundFromUrl({ url: sound.url, name: sound.title, maxSeconds: YOUTUBE_DEFAULT_MAX_SECONDS })
+      await this.api.library.addSoundFromUrl({ url: sound.url, name: sound.title, maxSeconds: this.importMaxSeconds() })
       status.textContent = 'Added ✓'
       document.dispatchEvent(new CustomEvent('library:linked'))
     } catch (err) {
-      status.textContent = `Failed: ${cleanErrorMessage(err, 'Import failed')}`
+      status.textContent = cleanErrorMessage(err, 'Import failed.')
       importBtn.disabled = false
     } finally {
       unsubscribe()
+      cancelBtn.remove()
+      importBtn.classList.remove('hidden')
       this.youtubeImporting = false
+      this.importingCard = null
       for (const btn of otherYoutubeButtons) {
-        if (btn !== importBtn) btn.disabled = false
+        // A card that already imported keeps its button disabled - re-enabling
+        // every other button used to offer "Import" again next to an "Added ✓".
+        if (btn !== importBtn && !btn.dataset.imported) btn.disabled = false
       }
+      if (status.textContent === 'Added ✓') importBtn.dataset.imported = 'true'
     }
+  }
+
+  // Swaps a running card's Import button for a Cancel one. Returns the
+  // button so the caller can take it away again when the import settles.
+  showCancelButton(card, importBtn) {
+    const cancelBtn = document.createElement('button')
+    cancelBtn.type = 'button'
+    cancelBtn.className = 'browse-cancel-btn btn btn-icon-text'
+    cancelBtn.textContent = 'Cancel'
+    cancelBtn.addEventListener('click', () => {
+      cancelBtn.disabled = true
+      cancelBtn.textContent = 'Cancelling…'
+      this.api.library.cancelAddSoundFromUrl?.().catch(() => {})
+    })
+    importBtn.classList.add('hidden')
+    importBtn.after(cancelBtn)
+    return cancelBtn
   }
 
   renderCard(sound, source) {

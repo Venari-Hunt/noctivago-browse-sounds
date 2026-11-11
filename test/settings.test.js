@@ -64,7 +64,7 @@ test('a rejected write still returns the normalized value', () => {
 })
 
 test('labels and wait estimates read like sentences', () => {
-  assert.equal(maxMinutesLabel(0), 'The whole video')
+  assert.equal(maxMinutesLabel(0), 'Whole video')
   assert.equal(maxMinutesLabel(1), 'First minute')
   assert.equal(maxMinutesLabel(10), 'First 10 minutes')
   assert.equal(estimateImportWait(1), 'well under a minute')

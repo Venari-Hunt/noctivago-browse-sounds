@@ -38,9 +38,12 @@ export function licenseLabel(url) {
   return match ? match[1] : 'Freesound license'
 }
 
+// m:ss, or h:mm:ss from an hour up (a 12-hour YouTube video read "720:00").
 export function formatDuration(seconds) {
   const s = Math.round(seconds ?? 0)
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  const pad = (n) => String(n).padStart(2, '0')
+  if (s >= 3600) return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`
+  return `${Math.floor(s / 60)}:${pad(s % 60)}`
 }
 
 // Strips Electron's IPC wrapping and keeps one readable sentence.
@@ -63,3 +66,46 @@ export function freshSourceState() {
   return { available: false, enabled: true, page: 0, hasMore: false, loading: false, error: null, generation: 0 }
 }
 
+
+// Search ideas shown before the first search, so the tab never opens blank.
+export const SUGGESTIONS = ['rain on a tent', 'night crickets', 'ocean waves', 'wood fire']
+
+// The 11-character id in any YouTube link form (watch?v=, youtu.be/, shorts/,
+// embed/), so a result can be matched to a sound imported from another link.
+export function youtubeVideoId(url) {
+  if (!url) return null
+  const m = /(?:[?&]v=|youtu\.be\/|\/shorts\/|\/embed\/|\/live\/)([\w-]{11})/.exec(String(url))
+  return m ? m[1] : null
+}
+
+// Keys for every sound already in the library that came from Freesound or
+// YouTube, so a result card can say "In library" instead of offering Import.
+export function libraryKeys(sounds) {
+  const keys = new Set()
+  for (const sound of Array.isArray(sounds) ? sounds : []) {
+    const source = sound?.source
+    if (source?.type === 'freesound' && source.freesoundId != null) keys.add(`freesound:${source.freesoundId}`)
+    const videoId = source?.type === 'url' ? youtubeVideoId(source.url) : null
+    if (videoId) keys.add(`youtube:${videoId}`)
+  }
+  return keys
+}
+
+export function resultKey(sound, source) {
+  if (source === 'freesound') return `freesound:${sound.id}`
+  const videoId = youtubeVideoId(sound.url) || sound.id
+  return `youtube:${videoId}`
+}
+
+// True when a search failed because the network is down, not because the
+// service refused it: the offline screen says so and offers a retry.
+const NETWORK_ERROR = /ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|fetch failed|network|offline|getaddrinfo|socket hang up|timed out/i
+export function isNetworkError(message, online = true) {
+  return !online || NETWORK_ERROR.test(String(message ?? ''))
+}
+
+// "Can't reach Freesound", "Can't reach YouTube" or both, for the offline screen.
+export function unreachableTitle(sourceKeys) {
+  const names = sourceKeys.map((key) => (key === 'freesound' ? 'Freesound' : 'YouTube'))
+  return `Can't reach ${names.length ? names.join(' or ') : 'the internet'}`
+}

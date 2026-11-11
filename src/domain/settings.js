@@ -59,7 +59,7 @@ export function writeSettings(settings, storage = globalThis.localStorage) {
 }
 
 export function maxMinutesLabel(minutes) {
-  if (minutes === 0) return 'The whole video'
+  if (minutes === 0) return 'Whole video'
   return minutes === 1 ? 'First minute' : `First ${minutes} minutes`
 }
 

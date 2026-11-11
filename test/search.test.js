@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { licenseLabel, formatDuration, cleanErrorMessage, freshSourceState } from '../src/domain/search.js'
+import { licenseLabel, formatDuration, cleanErrorMessage, freshSourceState, youtubeVideoId, libraryKeys, resultKey, isNetworkError, unreachableTitle } from '../src/domain/search.js'
 
 test('licenseLabel names Creative Commons licenses from their URL', () => {
   assert.equal(licenseLabel('http://creativecommons.org/publicdomain/zero/1.0/'), 'CC0')
@@ -40,4 +40,44 @@ test('freshSourceState starts enabled with no pages loaded', () => {
   assert.equal(s.enabled, true)
   assert.equal(s.page, 0)
   assert.notEqual(freshSourceState(), s)
+})
+
+test('formatDuration shows h:mm:ss from an hour up', () => {
+  assert.equal(formatDuration(43200), '12:00:00')
+  assert.equal(formatDuration(3725), '1:02:05')
+  assert.equal(formatDuration(3599), '59:59')
+})
+
+test('youtubeVideoId reads every link form', () => {
+  assert.equal(youtubeVideoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10'), 'dQw4w9WgXcQ')
+  assert.equal(youtubeVideoId('https://youtu.be/dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+  assert.equal(youtubeVideoId('https://youtube.com/shorts/dQw4w9WgXcQ'), 'dQw4w9WgXcQ')
+  assert.equal(youtubeVideoId('https://example.com/a'), null)
+  assert.equal(youtubeVideoId(undefined), null)
+})
+
+test('libraryKeys and resultKey match imported sounds to results', () => {
+  const keys = libraryKeys([
+    { source: { type: 'freesound', freesoundId: 243781 } },
+    { source: { type: 'url', url: 'https://youtu.be/dQw4w9WgXcQ' } },
+    { source: { type: 'file' } },
+    {}
+  ])
+  assert.equal(keys.size, 2)
+  assert.ok(keys.has(resultKey({ id: 243781 }, 'freesound')))
+  assert.ok(keys.has(resultKey({ id: 'dQw4w9WgXcQ', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }, 'youtube')))
+  assert.ok(!keys.has(resultKey({ id: 1 }, 'freesound')))
+  assert.equal(libraryKeys(null).size, 0)
+})
+
+test('isNetworkError tells a dead connection from a refusal', () => {
+  assert.ok(isNetworkError('getaddrinfo ENOTFOUND freesound.org'))
+  assert.ok(isNetworkError('fetch failed'))
+  assert.ok(isNetworkError('Freesound said 401', false))
+  assert.ok(!isNetworkError('Freesound said 401'))
+})
+
+test('unreachableTitle names what failed', () => {
+  assert.equal(unreachableTitle(['freesound']), "Can't reach Freesound")
+  assert.equal(unreachableTitle(['freesound', 'youtube']), "Can't reach Freesound or YouTube")
 })

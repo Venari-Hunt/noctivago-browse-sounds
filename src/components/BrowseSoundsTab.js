@@ -6,45 +6,65 @@
 // Local file/folder/watch-folder/record imports explicitly stay in core's
 // "+" menu, unchanged - only internet-sourced search moves here.
 //
-// Two sources, searched together and combined into one grid, each card
-// tagged with its own source badge - the owner's own answer (2026-09-15) to
-// "should this be a toggle or combined": "search both sources at once,
-// combined, tagged by source."
+// Two sources, searched together and combined into one grid - the owner's
+// own answer (2026-09-15) to "should this be a toggle or combined": "search
+// both sources at once, combined, tagged by source." A card's license slot
+// says "YouTube" for a video, which is its source tag.
+//
+// Desktop 2.0 (step 14): the look is the approved mock's `browse`,
+// `browse-first` and `browse-fail` screens (Global Management
+// design-system/mocks/noctivago-desktop.client.js). Results are the same
+// centered card as the Mixer, with a preview button where the knob sits; the
+// preview bar sits at the bottom of the tab instead of the shared sticky bar;
+// how much of a video to import and the YouTube sign-in sit on the search bar
+// (they still live in Settings → Browse Sounds too, same values).
 //
 // - Freesound: its own search/preview/import plumbing (src/main/freesound/)
 //   was already fully built (v0.1.190) - a card grid instead of a cramped
 //   modal list, infinite scroll instead of a "Load more" button, a sort
-//   picker the old dialog never exposed, and every field the API already
-//   returns (tags, description, rating).
+//   picker, and every field the API already returns (tags, description,
+//   rating).
 // - YouTube (v0.1.206, after a 2026-09-15 research pass - see CLAUDE.md):
-//   the official Data API's quota is per-project, not per-user, so a single
-//   app-wide key would cap this app's entire userbase combined at ~100
-//   searches/day - a non-starter. Instead this reuses the yt-dlp binary
-//   already bundled for "Add from link" (src/main/ytdlp/search.js), which
+//   the official Data API's quota is per-project, not per-user, so this
+//   reuses the yt-dlp binary already bundled for "Add from link", which
 //   searches with no key and no quota. No in-app audio preview (no cheap
-//   streaming preview URL the way Freesound has) - a "Watch ↗" link opens
-//   the real video externally instead. Import reuses the exact same
-//   yt-dlp-download pipeline "Add from link" already uses
-//   (library:addSoundFromUrl), capped at the same 10-minute default.
+//   streaming preview URL the way Freesound has) - the preview slot and the
+//   link button open the real video externally instead. Import reuses the
+//   exact same yt-dlp-download pipeline "Add from link" already uses.
 //
 // Isolation between the two sources is deliberate, not incidental (owner's
 // own direction): every YouTube-specific call - availability check, search,
-// import - is independently try/caught so a yt-dlp failure (missing binary,
-// network error, a search timeout, a malformed result) never blocks,
+// import - is independently try/caught so a yt-dlp failure never blocks,
 // clears, or otherwise affects Freesound's half, and vice versa. Each
 // source tracks its own page/loading/hasMore state; the shared grid and
 // infinite-scroll sentinel just reflect whichever source(s) still have more.
 //
 // Self-contained per the plugin sandbox's own rule (can't import outside
-// its own directory) - this plugin has no core logic to duplicate, though,
-// since window.noctivago.freesound/ytdlp/library are already the full API
-// surface a plugin needs (see PluginLoader.js: app.noctivago is
-// window.noctivago handed through wholesale).
+// its own directory) - window.noctivago.freesound/ytdlp/library are already
+// the full API surface a plugin needs.
 
-import { SORT_OPTIONS, FREESOUND_PAGE_SIZE, YOUTUBE_PAGE_SIZE, MAX_TAGS_SHOWN, SOURCE_KEYS, licenseLabel, formatDuration, cleanErrorMessage, freshSourceState } from '../domain/search.js'
-import { readSettings, writeSettings, maxMinutesLabel, estimateImportWait } from '../domain/settings.js'
+import {
+  SORT_OPTIONS, FREESOUND_PAGE_SIZE, YOUTUBE_PAGE_SIZE, MAX_TAGS_SHOWN, SOURCE_KEYS, SUGGESTIONS,
+  licenseLabel, formatDuration, cleanErrorMessage, freshSourceState,
+  libraryKeys, resultKey, isNetworkError, unreachableTitle
+} from '../domain/search.js'
+import { readSettings, writeSettings, maxMinutesLabel, estimateImportWait, MAX_MINUTES_OPTIONS } from '../domain/settings.js'
 import { createSettingsPage } from './SettingsPage.js'
-import { PLAY_ICON_SVG, PAUSE_ICON_SVG, LINK_ICON_SVG } from './icons.js'
+import { icon, PLAY_ICON_SVG, PAUSE_ICON_SVG } from './icons.js'
+
+// The mock's sign-in list, plus Brave, which the app's yt-dlp setting also takes.
+const COOKIE_BROWSERS = [
+  ['none', 'YouTube: not signed in'],
+  ['firefox', 'Sign in as Firefox'],
+  ['chrome', 'Sign in as Chrome'],
+  ['edge', 'Sign in as Edge'],
+  ['brave', 'Sign in as Brave']
+]
+
+// Tags on a card: one line, like the Mixer card's chips.
+const CARD_TAGS = Math.min(3, MAX_TAGS_SHOWN)
+
+const escapeHtml = (text) => String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
 
 export default class BrowseSoundsPlugin {
   constructor(app) {
@@ -55,25 +75,27 @@ export default class BrowseSoundsPlugin {
     this.sort = 'score'
     this.sources = { freesound: freshSourceState(), youtube: freshSourceState() }
     this.previewAudio = null
-    this.previewBtn = null
+    this.previewCard = null
     this.previewSound = null
     // Session-only, like the Remix plugin's own previewVolume - a listening
     // preference, not saved settings.
     this.previewVolume = 1
+    this.seekDragging = false
     this.observer = null
     this.requestId = 0
     // YouTube-only (Freesound's API gives a stable cursor): each page is a
-    // fresh yt-dlp search re-scraping up through its own end index rather
-    // than continuing a saved cursor (see search.js) - verified live that
+    // fresh yt-dlp search re-scraping up through its own end index, so
     // consecutive pages can rank a couple of videos differently between
     // calls, producing the odd repeat at a page boundary. Tracked per
-    // search (cleared in search(), not loadMore()) so a genuine "same video
-    // shown twice" doesn't slip through infinite scroll.
+    // search (cleared in search(), not loadMore()).
     this.seenYoutubeIds = new Set()
     this.youtubeImporting = false
     // The card whose import is running, so a second click can point at it
     // instead of doing nothing, and so Cancel knows what to put back.
     this.importingCard = null
+    // Freesound and YouTube sounds already in the library, so their cards
+    // say "In library" instead of offering a second import.
+    this.inLibrary = new Set()
     // This plugin's own saved options (src/domain/settings.js), kept here so
     // every import reads one value rather than a hard-coded constant.
     this.settings = readSettings()
@@ -84,7 +106,7 @@ export default class BrowseSoundsPlugin {
       id: 'browse-sounds',
       title: 'Browse Sounds',
       mount: (container) => this.mount(container),
-      mountSticky: (container) => this.mountSticky(container),
+      onShow: () => this.refreshLibrary(),
       onHide: () => this.stopPreview()
     })
     // A plugin's options belong to the plugin, not to the app's own Settings
@@ -101,6 +123,7 @@ export default class BrowseSoundsPlugin {
   async onunload() {
     this.stopPreview()
     this.observer?.disconnect()
+    window.removeEventListener('mousemove', this.onWindowMouseMove)
     this.unregisterSettings?.()
     this.unregister?.()
   }
@@ -113,6 +136,7 @@ export default class BrowseSoundsPlugin {
 
   updateSettings(patch) {
     this.settings = writeSettings({ ...this.settings, ...patch })
+    if (this.els.length) this.els.length.value = String(this.settings.maxMinutes)
     this.describeImportLength()
     return this.settings
   }
@@ -122,56 +146,108 @@ export default class BrowseSoundsPlugin {
     return this.settings.maxMinutes > 0 ? this.settings.maxMinutes * 60 : 0
   }
 
-  // Says up front what a YouTube import will take. The wait is the whole
+  // Says up front how long a YouTube import takes. The wait is the whole
   // reason importing from YouTube felt broken: YouTube throttles long
-  // uploads to roughly playback speed, so the old fixed 10-minute cap meant
-  // about five minutes of apparently nothing happening.
+  // uploads to roughly playback speed.
   describeImportLength() {
     if (!this.els.lengthHint) return
     const { maxMinutes } = this.settings
-    this.els.lengthHint.textContent =
-      `YouTube imports download ${maxMinutesLabel(maxMinutes).toLowerCase()} of a video — ${estimateImportWait(maxMinutes)}, ` +
-      'because YouTube caps the speed on long videos. Change it in Settings → Browse Sounds.'
+    this.els.lengthHint.textContent = `A YouTube import at ${maxMinutesLabel(maxMinutes)} takes ${estimateImportWait(maxMinutes)}: YouTube caps the speed on long videos.`
   }
 
   mount(container) {
+    const srcChip = (key, label) => `<button type="button" class="bs-srcchip" data-source-toggle="${key}" aria-pressed="true">${label}</button>`
     container.innerHTML = `
-      <div class="browse-tab">
-        <p class="browse-hint">Search and import ambient sounds from Freesound.org and YouTube straight into your library. Freesound downloads only the compressed preview (not the original file) — attribution is kept automatically for licenses that require it.</p>
-        <p class="browse-hint" id="browse-length-hint"></p>
-
-        <div class="browse-search-row">
-          <input id="browse-query" type="text" placeholder="rain, wind, birds…" autocomplete="off" />
-          <select id="browse-sort" title="Sorts Freesound results - YouTube results follow its own relevance order">
+      <div class="bs-tab">
+        <div class="bs-tools">
+          <input id="browse-query" class="bs-field bs-grow" type="text" placeholder="rain, wind, birds…" aria-label="Search" autocomplete="off" />
+          <button id="browse-search-btn" class="bs-b bs-pri" type="button">${icon('search')}Search</button>
+        </div>
+        <div class="bs-tools bs-sub">
+          <span class="bs-dim">Search these sources</span>
+          ${srcChip('freesound', 'Freesound')}${srcChip('youtube', 'YouTube')}
+          <select id="browse-sort" class="bs-field" aria-label="Sort Freesound results" title="Sorts Freesound results; YouTube results keep their own order">
             ${SORT_OPTIONS.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
           </select>
-          <button id="browse-search-btn" class="btn btn-primary" type="button">Search</button>
+          <select id="browse-length" class="bs-field" aria-label="How much of a YouTube video to import" title="How much of a YouTube video to import">
+            ${MAX_MINUTES_OPTIONS.map((minutes) => `<option value="${minutes}">${maxMinutesLabel(minutes)}</option>`).join('')}
+          </select>
+          <select id="browse-cookies" class="bs-field" aria-label="YouTube: sign in as" title="YouTube: sign in as">
+            ${COOKIE_BROWSERS.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
+          </select>
         </div>
 
-        <div class="browse-source-toggles">
-          <label><input type="checkbox" id="browse-source-freesound" checked> Freesound</label>
-          <label><input type="checkbox" id="browse-source-youtube" checked> YouTube</label>
+        <p id="browse-unavailable" class="bs-hint hidden"></p>
+
+        <div id="browse-first" class="bs-empty">
+          ${icon('headphones', 40)}
+          <h2>Find sounds for your mix</h2>
+          <p>Search Freesound and YouTube. Added sounds go straight to your library.</p>
+          <div class="bs-chips bs-big">${SUGGESTIONS.map((x) => `<button type="button" class="bs-chip" data-suggest="${escapeHtml(x)}">${escapeHtml(x)}</button>`).join('')}</div>
         </div>
 
-        <p id="browse-unavailable" class="modal-hint hidden"></p>
-        <p id="browse-status" class="browse-status"></p>
-        <div id="browse-results" class="browse-results"></div>
-        <div id="browse-sentinel" class="browse-sentinel hidden"></div>
+        <div id="browse-fail" class="bs-empty hidden">
+          ${icon('wifi', 40)}
+          <h2 id="browse-fail-title"></h2>
+          <p id="browse-fail-text"></p>
+          <div class="bs-row">
+            <button id="browse-retry" class="bs-b" type="button">${icon('refresh-cw')}Try again</button>
+            <button id="browse-to-mixer" class="bs-b bs-ghost" type="button">Back to the mixer</button>
+          </div>
+        </div>
+
+        <p id="browse-status" class="bs-hint hidden"></p>
+
+        <div id="browse-group" class="bs-group hidden">
+          <h2 class="bs-gh">Results<span id="browse-count"></span></h2>
+          <div id="browse-results" class="bs-tiles"></div>
+        </div>
+        <div id="browse-sentinel" class="bs-sentinel hidden"></div>
+        <div id="browse-foot" class="hidden">
+          <p class="bs-hint">Freesound adds its compressed preview and keeps the credit the license asks for. One import runs at a time.</p>
+          <p class="bs-hint" id="browse-length-hint"></p>
+        </div>
+
+        <div id="browse-pvbar" class="bs-pvbar hidden">
+          <button id="browse-pv-play" class="bs-b bs-play bs-sm" type="button" aria-label="Pause preview">${PAUSE_ICON_SVG}</button>
+          <b id="browse-pv-name" class="bs-elli"></b>
+          <input id="browse-pv-seek" class="bs-fader" type="range" min="0" max="1000" value="0" style="--p:0%" aria-label="Drag to seek" />
+          <span id="browse-pv-time" class="bs-num">0:00 / 0:00</span>
+          <span class="bs-dim">${icon('volume-2')}</span>
+          <div class="bs-vol"><input id="browse-pv-volume" class="bs-fader" type="range" min="0" max="100" value="100" style="--p:100%" aria-label="Preview volume" /></div>
+        </div>
       </div>
     `
 
+    const $ = (sel) => container.querySelector(sel)
     this.els = {
-      query: container.querySelector('#browse-query'),
-      sort: container.querySelector('#browse-sort'),
-      searchBtn: container.querySelector('#browse-search-btn'),
-      sourceToggles: { freesound: container.querySelector('#browse-source-freesound'), youtube: container.querySelector('#browse-source-youtube') },
-      unavailable: container.querySelector('#browse-unavailable'),
-      lengthHint: container.querySelector('#browse-length-hint'),
-      status: container.querySelector('#browse-status'),
-      results: container.querySelector('#browse-results'),
-      sentinel: container.querySelector('#browse-sentinel')
+      query: $('#browse-query'),
+      sort: $('#browse-sort'),
+      length: $('#browse-length'),
+      cookies: $('#browse-cookies'),
+      searchBtn: $('#browse-search-btn'),
+      sourceToggles: { freesound: $('[data-source-toggle="freesound"]'), youtube: $('[data-source-toggle="youtube"]') },
+      unavailable: $('#browse-unavailable'),
+      first: $('#browse-first'),
+      fail: $('#browse-fail'),
+      failTitle: $('#browse-fail-title'),
+      failText: $('#browse-fail-text'),
+      status: $('#browse-status'),
+      group: $('#browse-group'),
+      count: $('#browse-count'),
+      results: $('#browse-results'),
+      sentinel: $('#browse-sentinel'),
+      foot: $('#browse-foot'),
+      lengthHint: $('#browse-length-hint'),
+      pvbar: $('#browse-pvbar'),
+      pvPlay: $('#browse-pv-play'),
+      pvName: $('#browse-pv-name'),
+      pvSeek: $('#browse-pv-seek'),
+      pvTime: $('#browse-pv-time'),
+      pvVolume: $('#browse-pv-volume')
     }
 
+    this.els.length.value = String(this.settings.maxMinutes)
     this.describeImportLength()
 
     this.els.searchBtn.addEventListener('click', () => this.search())
@@ -181,9 +257,29 @@ export default class BrowseSoundsPlugin {
     this.els.sort.addEventListener('change', () => {
       if (this.query) this.search()
     })
+    this.els.length.addEventListener('change', () => this.updateSettings({ maxMinutes: Number(this.els.length.value) }))
+    this.wireCookieSelect()
     for (const key of SOURCE_KEYS) {
-      this.els.sourceToggles[key].addEventListener('change', (evt) => this.toggleSource(key, evt.target.checked))
+      const chip = this.els.sourceToggles[key]
+      chip.addEventListener('click', () => {
+        const on = chip.getAttribute('aria-pressed') !== 'true'
+        chip.setAttribute('aria-pressed', String(on))
+        this.toggleSource(key, on)
+      })
     }
+    container.querySelectorAll('[data-suggest]').forEach((chip) =>
+      chip.addEventListener('click', () => {
+        this.els.query.value = chip.dataset.suggest
+        this.search()
+      })
+    )
+    $('#browse-retry').addEventListener('click', () => {
+      if (this.els.query.value.trim()) this.search()
+      else this.showScreen('first')
+    })
+    $('#browse-to-mixer').addEventListener('click', () => this.showMixer())
+
+    this.wirePreviewBar()
 
     this.observer = new IntersectionObserver((entries) => {
       if (entries[0]?.isIntersecting) this.loadMore()
@@ -191,133 +287,129 @@ export default class BrowseSoundsPlugin {
     this.observer.observe(this.els.sentinel)
 
     this.checkAvailability()
+    this.refreshLibrary()
   }
 
-  // A stripped-down echo of the Remix plugin's own sticky playback bar -
-  // Play/Pause, a draggable progress bar, a volume slider - with none of
-  // Remix's editing modules, per the owner's own 2026-09-16 inbox request:
-  // "a topbar similar to the one on the remix tab but without the audio
-  // editing modules, just the ones that control playback and volume."
-  // YouTube results have no in-app preview (see the file-header comment),
-  // so this bar only ever drives a Freesound preview.
-  mountSticky(container) {
-    container.innerHTML = `
-      <span id="browse-sticky-name" class="browse-sticky-name">No preview playing</span>
-      <button id="browse-sticky-play" class="btn btn-svg-icon" type="button" title="Play" disabled>${PLAY_ICON_SVG}</button>
-      <div id="browse-sticky-progress" class="browse-sticky-progress" title="Drag to seek">
-        <div class="browse-sticky-progress-track">
-          <div id="browse-sticky-progress-fill" class="browse-sticky-progress-fill"></div>
-        </div>
-        <div id="browse-sticky-progress-thumb" class="browse-sticky-progress-thumb"></div>
-      </div>
-      <span id="browse-sticky-time" class="browse-sticky-time">0:00 / 0:00</span>
-      <input id="browse-sticky-volume" type="range" min="0" max="100" value="100" class="browse-sticky-volume" title="Preview volume" />
-    `
+  // The sign-in browser is core's setting, shared with "Add from link", so
+  // it's read from and written straight back to the app rather than copied.
+  wireCookieSelect() {
+    const select = this.els.cookies
+    select.addEventListener('change', () => {
+      this.api.settings?.setYtDlpCookiesBrowser(select.value).catch(() => {})
+    })
+    Promise.resolve()
+      .then(() => this.api.settings?.get())
+      .then((appSettings) => {
+        const value = appSettings?.ytDlpCookiesBrowser ?? 'none'
+        if (COOKIE_BROWSERS.some(([v]) => v === value)) select.value = value
+      })
+      .catch(() => {})
+  }
 
-    this.els.stickyName = container.querySelector('#browse-sticky-name')
-    this.els.stickyPlay = container.querySelector('#browse-sticky-play')
-    this.els.stickyProgress = container.querySelector('#browse-sticky-progress')
-    this.els.stickyProgressFill = container.querySelector('#browse-sticky-progress-fill')
-    this.els.stickyProgressThumb = container.querySelector('#browse-sticky-progress-thumb')
-    this.els.stickyTime = container.querySelector('#browse-sticky-time')
-    this.els.stickyVolume = container.querySelector('#browse-sticky-volume')
+  // "Back to the mixer" on the offline screen. The plugin API only shows a
+  // plugin's own tabs, so this presses the Mixer's tab button.
+  showMixer() {
+    const button = [...document.querySelectorAll('.tab-button')].find((b) => b.title === 'Mixer')
+    button?.click()
+  }
 
-    this.els.stickyPlay.addEventListener('click', () => {
-      if (!this.previewAudio) return
-      if (this.previewAudio.paused) {
-        this.previewAudio.play().then(() => this.applyPreviewPlayState(true)).catch(() => this.stopPreview())
-      } else {
-        this.previewAudio.pause()
+  // Which body the tab shows: the first-run suggestions, the offline screen,
+  // or the results (with a status line while searching or when empty).
+  showScreen(screen) {
+    this.els.first.classList.toggle('hidden', screen !== 'first')
+    this.els.fail.classList.toggle('hidden', screen !== 'fail')
+    const results = screen === 'results'
+    if (!results) {
+      this.els.status.classList.add('hidden')
+      this.els.group.classList.add('hidden')
+      this.els.foot.classList.add('hidden')
+      this.els.sentinel.classList.add('hidden')
+    }
+  }
+
+  showFailure(failedKeys) {
+    this.stopPreview()
+    this.els.failTitle.textContent = unreachableTitle(failedKeys)
+    this.els.failText.textContent = 'No connection. Your own sounds still work.'
+    this.showScreen('fail')
+  }
+
+  // Preview bar at the bottom of the tab: Play/Pause, drag to seek, time,
+  // volume (owner inbox, 2026-09-16: "a topbar similar to the one on the
+  // remix tab but without the audio editing modules"). Only a Freesound
+  // preview drives it; YouTube results have no in-app preview.
+  wirePreviewBar() {
+    const { pvPlay, pvSeek, pvVolume } = this.els
+    pvPlay.addEventListener('click', () => {
+      const audio = this.previewAudio
+      if (!audio) return
+      if (audio.paused) audio.play().then(() => this.applyPreviewPlayState(true)).catch(() => this.stopPreview())
+      else {
+        audio.pause()
         this.applyPreviewPlayState(false)
       }
     })
-
-    this.els.stickyVolume.addEventListener('input', () => {
-      this.previewVolume = Number(this.els.stickyVolume.value) / 100
+    pvSeek.addEventListener('pointerdown', () => (this.seekDragging = true))
+    pvSeek.addEventListener('pointerup', () => (this.seekDragging = false))
+    pvSeek.addEventListener('input', () => {
+      const audio = this.previewAudio
+      pvSeek.style.setProperty('--p', `${pvSeek.value / 10}%`)
+      if (!audio || !Number.isFinite(audio.duration)) return
+      audio.currentTime = (pvSeek.value / 1000) * audio.duration
+      this.updatePreviewProgress(true)
+    })
+    pvSeek.addEventListener('change', () => (this.seekDragging = false))
+    pvVolume.addEventListener('input', () => {
+      this.previewVolume = Number(pvVolume.value) / 100
+      pvVolume.style.setProperty('--p', `${pvVolume.value}%`)
       if (this.previewAudio) this.previewAudio.volume = this.previewVolume
     })
-
-    this.wireStickyProgressDrag()
   }
 
-  // Click-or-drag-to-seek on the sticky progress bar (owner inbox,
-  // 2026-09-16: "a progress bar with the little circle... so the user can
-  // go back or move forward") - same mousedown/mousemove/mouseup shape the
-  // Remix plugin's own wireStickyProgressDrag() uses, simplified since a
-  // preview here has no loop region to stay within, just 0..duration.
-  wireStickyProgressDrag() {
-    let dragging = false
-
-    const seekFromClientX = (clientX) => {
-      const audio = this.previewAudio
-      if (!audio || !Number.isFinite(audio.duration)) return
-      const rect = this.els.stickyProgress.getBoundingClientRect()
-      const fraction = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1)
-      audio.currentTime = fraction * audio.duration
-      this.updateStickyProgress()
-    }
-
-    this.els.stickyProgress.addEventListener('mousedown', (evt) => {
-      if (!this.previewAudio) return
-      dragging = true
-      seekFromClientX(evt.clientX)
-    })
-    window.addEventListener('mousemove', (evt) => {
-      if (!dragging) return
-      seekFromClientX(evt.clientX)
-    })
-    window.addEventListener('mouseup', () => {
-      dragging = false
-    })
-  }
-
-  // Guarded on stickyProgressFill existing since this can theoretically be
-  // called before mountSticky() has run.
-  updateStickyProgress() {
-    if (!this.els.stickyProgressFill) return
+  updatePreviewProgress(fromSeek = false) {
+    const { pvSeek, pvTime } = this.els
+    if (!pvSeek) return
     const audio = this.previewAudio
     const span = audio && Number.isFinite(audio.duration) ? audio.duration : 0
     const elapsed = audio ? Math.min(Math.max(audio.currentTime, 0), span) : 0
-    const pct = span > 0 ? (elapsed / span) * 100 : 0
-    this.els.stickyProgressFill.style.width = `${pct}%`
-    this.els.stickyProgressThumb.style.left = `${pct}%`
-    this.els.stickyTime.textContent = `${formatDuration(elapsed)} / ${formatDuration(span)}`
+    if (!fromSeek && !this.seekDragging) {
+      const value = span > 0 ? Math.round((elapsed / span) * 1000) : 0
+      pvSeek.value = String(value)
+      pvSeek.style.setProperty('--p', `${value / 10}%`)
+    }
+    pvTime.textContent = `${formatDuration(elapsed)} / ${formatDuration(span)}`
   }
 
   applyPreviewPlayState(playing) {
-    if (this.previewBtn) {
-      this.previewBtn.textContent = playing ? '⏸' : '▶'
-      this.previewBtn.title = playing ? 'Stop preview' : 'Preview'
+    const btn = this.previewCard?.querySelector('.bs-pv')
+    if (btn) {
+      btn.innerHTML = icon(playing ? 'pause' : 'play', 24)
+      btn.setAttribute('aria-pressed', String(playing))
+      btn.title = playing ? 'Stop preview' : 'Preview'
     }
-    if (!this.els.stickyPlay) return
-    this.els.stickyPlay.innerHTML = playing ? PAUSE_ICON_SVG : PLAY_ICON_SVG
-    this.els.stickyPlay.title = playing ? 'Pause' : 'Play'
+    if (!this.els.pvPlay) return
+    this.els.pvPlay.innerHTML = playing ? PAUSE_ICON_SVG : PLAY_ICON_SVG
+    this.els.pvPlay.setAttribute('aria-label', playing ? 'Pause preview' : 'Play preview')
   }
 
   // Owner's own follow-up direction (2026-09-16, inbox): "Youtube search as
-  // well as freesound search should be toggles" - unlike the earlier
-  // "combined, tagged by source, not a toggle" decision (which is still
-  // honored: both sources still render into one shared grid, this is only
-  // about whether a source is searched at all). Unchecking a source removes
-  // its cards from the grid immediately; re-checking it with an active
-  // query fetches it fresh into the existing grid rather than requiring a
-  // whole new search.
+  // well as freesound search should be toggles" - both sources still render
+  // into one shared grid, this is only about whether a source is searched
+  // at all. Turning a source off removes its cards immediately; turning it
+  // back on with an active query fetches it fresh into the existing grid.
   toggleSource(key, enabled) {
     const s = this.sources[key]
     s.enabled = enabled
-    // Its cards are gone from the grid either way (removed now, or never
-    // added yet) - the dedup set must match that, or re-enabling filters
-    // out every result as a false "already shown" duplicate.
+    // Its cards are gone from the grid either way - the dedup set must match
+    // that, or re-enabling filters out every result as a false duplicate.
     if (key === 'youtube') this.seenYoutubeIds.clear()
     if (!enabled) {
       // Bumping generation invalidates any fetch for this source still in
-      // flight from before it was disabled - it'll discard its response as
-      // stale instead of silently re-adding cards (or racing a fetch the
-      // re-enable branch below starts) once it resolves.
+      // flight - it'll discard its response as stale instead of re-adding cards.
       s.generation += 1
       this.clearSourceCards(key)
       s.hasMore = false
-      this.updateStatus()
+      if (this.query) this.updateStatus()
       this.updateSentinelVisibility()
       return
     }
@@ -328,7 +420,10 @@ export default class BrowseSoundsPlugin {
   }
 
   clearSourceCards(key) {
-    for (const el of this.els.results.querySelectorAll(`[data-source="${key}"]`)) el.remove()
+    for (const el of this.els.results.querySelectorAll(`[data-source="${key}"]`)) {
+      if (el === this.previewCard) this.stopPreview()
+      el.remove()
+    }
   }
 
   updateSentinelVisibility() {
@@ -336,8 +431,7 @@ export default class BrowseSoundsPlugin {
   }
 
   // Each source's own availability check is independent - a throwing
-  // YouTube check (e.g. an older cached preload with no ytdlp namespace)
-  // must never stop Freesound's own check from running or being trusted.
+  // YouTube check must never stop Freesound's own check from running.
   async checkAvailability() {
     const [freesoundAvailable, youtubeAvailable] = await Promise.all([
       this.api.freesound.isAvailable().catch(() => false),
@@ -354,27 +448,33 @@ export default class BrowseSoundsPlugin {
     if (!freesoundAvailable && !youtubeAvailable) {
       this.els.unavailable.textContent = "Search isn't available in this build."
     } else if (!freesoundAvailable) {
-      this.els.unavailable.textContent = "Freesound import isn't available in this build (no API key baked in) — YouTube search still works."
+      this.els.unavailable.textContent = "Freesound import isn't available in this build (no API key baked in). YouTube search still works."
     } else if (!youtubeAvailable) {
-      this.els.unavailable.textContent = "YouTube search isn't available in this build — Freesound still works."
+      this.els.unavailable.textContent = "YouTube search isn't available in this build. Freesound still works."
     }
     this.els.query.disabled = !anyAvailable
     this.els.searchBtn.disabled = !anyAvailable
     for (const key of SOURCE_KEYS) {
-      const toggle = this.els.sourceToggles[key]
-      toggle.disabled = !this.sources[key].available
-      if (!this.sources[key].available) {
-        toggle.checked = false
-        this.sources[key].enabled = false
-        continue
-      }
+      const chip = this.els.sourceToggles[key]
+      chip.disabled = !this.sources[key].available
       // Which sources start on is a saved preference (Settings → Browse
-      // Sounds); the toggles above the results still override it per search.
-      const enabled = key === 'freesound' ? this.settings.freesoundEnabled : this.settings.youtubeEnabled
-      toggle.checked = enabled
+      // Sounds); the chips on the search bar still override it per search.
+      const enabled = this.sources[key].available && (key === 'freesound' ? this.settings.freesoundEnabled : this.settings.youtubeEnabled)
+      chip.setAttribute('aria-pressed', String(enabled))
       this.sources[key].enabled = enabled
     }
     if (anyAvailable) this.els.query.focus()
+  }
+
+  async refreshLibrary() {
+    try {
+      this.inLibrary = libraryKeys(await this.api.library.list())
+    } catch {
+      return
+    }
+    for (const card of this.els.results?.children ?? []) {
+      if (card !== this.importingCard && this.inLibrary.has(card.dataset.key) && !card.querySelector('.bs-have')) this.setCardState(card, 'have')
+    }
   }
 
   search() {
@@ -387,22 +487,22 @@ export default class BrowseSoundsPlugin {
     for (const key of SOURCE_KEYS) {
       const s = this.sources[key]
       s.page = 0
+      s.total = null
       s.hasMore = s.available && s.enabled
       s.error = null
     }
     this.els.results.replaceChildren()
-    this.els.sentinel.classList.add('hidden')
-    this.els.status.textContent = 'Searching…'
     this.seenYoutubeIds.clear()
 
-    const anySourceQueried = SOURCE_KEYS.some((key) => this.sources[key].available && this.sources[key].enabled)
-    if (!anySourceQueried) {
-      this.updateStatus()
+    const queried = SOURCE_KEYS.filter((key) => this.sources[key].available && this.sources[key].enabled)
+    // No network at all: say so now instead of waiting for both searches to time out.
+    if (queried.length && !navigator.onLine) {
+      this.showFailure(queried)
       return
     }
-    for (const key of SOURCE_KEYS) {
-      if (this.sources[key].available && this.sources[key].enabled) this.fetchSource(key, { append: false })
-    }
+    this.showScreen('results')
+    this.updateStatus()
+    for (const key of queried) this.fetchSource(key, { append: false })
   }
 
   loadMore() {
@@ -415,8 +515,7 @@ export default class BrowseSoundsPlugin {
 
   // Isolation (owner's own direction, 2026-09-15): each source is fetched
   // and rendered independently, wrapped in its own try/catch, so a failure
-  // in one (a thrown IPC error, a malformed result crashing renderCard)
-  // never wipes or blocks the other source's results already on screen.
+  // in one never wipes or blocks the other source's results already on screen.
   async fetchSource(key, { append }) {
     const s = this.sources[key]
     s.loading = true
@@ -437,11 +536,8 @@ export default class BrowseSoundsPlugin {
     this.updateSearchButtonState()
 
     // Superseded by this same source being toggled off (and possibly back
-    // on) since this fetch started - toggling off bumps generation, so a
-    // late response here is stale even if the source is enabled again by
-    // now (a fresh fetchSource call from the re-enable already owns the
-    // current generation). Checked after clearing s.loading above so a
-    // disabled source's search button doesn't stay stuck disabled forever.
+    // on) since this fetch started. Checked after clearing s.loading above
+    // so the search button doesn't stay stuck disabled.
     if (generation !== s.generation) return
 
     if (!result.ok) {
@@ -452,10 +548,10 @@ export default class BrowseSoundsPlugin {
     }
 
     s.error = null
+    if (key === 'freesound' && Number.isFinite(result.count)) s.total = result.count
     if (!append) {
       // A source that returns late (e.g. YouTube's slower search) must not
-      // wipe cards the other source already appended for this same fresh
-      // search - only ever clear this source's own prior cards.
+      // wipe cards the other source already appended - only its own.
       this.clearSourceCards(key)
     }
     for (const sound of result.results) {
@@ -486,23 +582,41 @@ export default class BrowseSoundsPlugin {
     this.els.searchBtn.disabled = this.sources.freesound.loading || this.sources.youtube.loading
   }
 
+  // "Results 10 of 1,204": Freesound gives its total; YouTube adds what it
+  // has shown, with a + while more pages remain.
+  countLabel(count) {
+    const fs = this.sources.freesound
+    const yt = this.sources.youtube
+    if (fs.total == null || (!fs.hasMore && !yt.hasMore)) return String(count)
+    const youtubeShown = this.els.results.querySelectorAll('[data-source="youtube"]').length
+    return `${count} of ${(fs.total + youtubeShown).toLocaleString('en-US')}${yt.hasMore ? '+' : ''}`
+  }
+
   updateStatus() {
     const count = this.els.results.children.length
     const anyLoading = this.sources.freesound.loading || this.sources.youtube.loading
-    if (count === 0 && anyLoading) {
-      this.els.status.textContent = 'Searching…'
+    const setStatus = (text) => {
+      this.els.status.textContent = text
+      this.els.status.classList.toggle('hidden', !text)
+    }
+    this.els.group.classList.toggle('hidden', count === 0)
+    this.els.foot.classList.toggle('hidden', count === 0)
+    if (count > 0) {
+      this.els.count.textContent = this.countLabel(count)
+      const errors = SOURCE_KEYS.filter((key) => this.sources[key].error).map((key) => `${key === 'freesound' ? 'Freesound' : 'YouTube'}: ${this.sources[key].error}`)
+      setStatus(errors.join(' · '))
       return
     }
-    if (count === 0) {
-      if (!this.sources.freesound.enabled && !this.sources.youtube.enabled) {
-        this.els.status.textContent = 'Turn on at least one source above to search.'
-        return
-      }
-      const errors = [this.sources.freesound.error, this.sources.youtube.error].filter(Boolean)
-      this.els.status.textContent = errors[0] || 'No results.'
+    if (anyLoading) return setStatus('Searching…')
+    const enabled = SOURCE_KEYS.filter((key) => this.sources[key].available && this.sources[key].enabled)
+    if (!enabled.length) return setStatus('Turn on at least one source above to search.')
+    const failed = enabled.filter((key) => this.sources[key].error)
+    // Every source that was asked failed for lack of a connection: the offline screen.
+    if (failed.length === enabled.length && failed.every((key) => isNetworkError(this.sources[key].error, navigator.onLine))) {
+      this.showFailure(failed)
       return
     }
-    this.els.status.textContent = `${count} result${count === 1 ? '' : 's'}`
+    setStatus(failed.length ? this.sources[failed[0]].error : `No results for "${this.query}".`)
   }
 
   stopPreview() {
@@ -511,44 +625,95 @@ export default class BrowseSoundsPlugin {
       this.previewAudio.src = ''
       this.previewAudio = null
     }
-    if (this.previewBtn) {
-      this.previewBtn.textContent = '▶'
-      this.previewBtn.title = 'Preview'
-      this.previewBtn = null
-    }
-    this.previewSound = null
-    if (this.els.stickyPlay) this.els.stickyPlay.disabled = true
-    if (this.els.stickyName) this.els.stickyName.textContent = 'No preview playing'
     this.applyPreviewPlayState(false)
-    this.updateStickyProgress()
+    this.previewCard?.classList.remove('bs-on')
+    this.previewCard = null
+    this.previewSound = null
+    this.els.pvbar?.classList.add('hidden')
+    this.updatePreviewProgress()
   }
 
-  togglePreview(sound, btn) {
-    if (this.previewBtn === btn) {
+  togglePreview(sound, card) {
+    if (this.previewCard === card) {
       this.stopPreview()
       return
     }
     this.stopPreview()
     const audio = new Audio(`freesound-preview://p/${encodeURIComponent(sound.previewUrl)}`)
     audio.volume = this.previewVolume
-    audio.addEventListener('loadedmetadata', () => this.updateStickyProgress())
-    audio.addEventListener('timeupdate', () => this.updateStickyProgress())
+    audio.addEventListener('loadedmetadata', () => this.updatePreviewProgress())
+    audio.addEventListener('timeupdate', () => this.updatePreviewProgress())
     audio.addEventListener('ended', () => this.stopPreview())
     audio.addEventListener('error', () => this.stopPreview())
     audio.play().catch(() => this.stopPreview())
     this.previewAudio = audio
-    this.previewBtn = btn
+    this.previewCard = card
     this.previewSound = sound
+    card.classList.add('bs-on')
     this.applyPreviewPlayState(true)
-    if (this.els.stickyPlay) this.els.stickyPlay.disabled = false
-    if (this.els.stickyName) this.els.stickyName.textContent = sound.name
+    this.els.pvName.textContent = sound.name
+    this.els.pvName.title = sound.name
+    this.els.pvbar.classList.remove('hidden')
   }
 
-  async importResult(sound, card) {
-    const importBtn = card.querySelector('.browse-import-btn')
-    const status = card.querySelector('.browse-card-status')
-    importBtn.disabled = true
-    status.textContent = 'Importing…'
+  // A card's bottom slot: Import, In library / Added, or a running download.
+  setCardState(card, state, { message = '', percent = null } = {}) {
+    const slot = card.querySelector('.bs-state')
+    const source = card.dataset.source
+    if (state === 'have' || state === 'added') {
+      slot.innerHTML = `<div class="bs-have">${icon('check')}${state === 'have' ? 'In library' : 'Added'}</div>`
+      card.dataset.imported = 'true'
+      return
+    }
+    if (state === 'busy') {
+      slot.innerHTML = `<div class="bs-dl"><div class="bs-sb"><i></i></div><span class="bs-meta"></span>${source === 'youtube' ? '<button type="button" class="bs-b bs-ghost bs-cancel">Cancel</button>' : ''}</div>`
+      slot.querySelector('.bs-meta').textContent = message
+      const bar = slot.querySelector('.bs-sb')
+      bar.classList.toggle('hidden', percent == null)
+      if (percent != null) bar.firstElementChild.style.width = `${percent}%`
+      slot.querySelector('.bs-cancel')?.addEventListener('click', (evt) => {
+        evt.currentTarget.disabled = true
+        evt.currentTarget.textContent = 'Cancelling…'
+        this.api.library.cancelAddSoundFromUrl?.().catch(() => {})
+      })
+      return
+    }
+    const importBtn = `<button type="button" class="bs-b bs-import">${icon('download')}Import</button>`
+    slot.innerHTML =
+      source === 'youtube'
+        ? `<div class="bs-row">${importBtn}<a class="bs-i" href="${escapeHtml(card.dataset.url)}" target="_blank" rel="noopener noreferrer" title="Watch on YouTube" aria-label="Watch on YouTube">${icon('external-link')}</a></div>`
+        : importBtn
+    slot.querySelector('.bs-import').addEventListener('click', () => (source === 'freesound' ? this.importResult(card) : this.importYouTubeResult(card)))
+  }
+
+  // Updates a running download in place, without rebuilding the Cancel button.
+  setCardProgress(card, { message, percent = null }) {
+    const dl = card.querySelector('.bs-dl')
+    if (!dl) return this.setCardState(card, 'busy', { message, percent })
+    if (message != null) dl.querySelector('.bs-meta').textContent = message
+    const bar = dl.querySelector('.bs-sb')
+    bar.classList.toggle('hidden', percent == null)
+    if (percent != null) bar.firstElementChild.style.width = `${percent}%`
+  }
+
+  setCardMessage(card, text) {
+    const msg = card.querySelector('.bs-msg')
+    msg.textContent = text
+    msg.classList.toggle('hidden', !text)
+  }
+
+  async importResult(card) {
+    const sound = card._sound
+    this.setCardMessage(card, '')
+    this.setCardState(card, 'busy', { message: 'Importing…' })
+    let unsubscribe = null
+    try {
+      unsubscribe = this.api.library.onAddSoundFromFreesoundProgress?.((update) => {
+        if (update?.message) this.setCardProgress(card, { message: update.message })
+      })
+    } catch {
+      unsubscribe = null
+    }
     try {
       await this.api.library.addSoundFromFreesound({
         freesoundId: sound.id,
@@ -560,216 +725,141 @@ export default class BrowseSoundsPlugin {
         description: sound.description,
         tags: sound.tags
       })
-      status.textContent = 'Added ✓'
+      this.inLibrary.add(card.dataset.key)
+      this.setCardState(card, 'added')
       document.dispatchEvent(new CustomEvent('library:linked'))
     } catch (err) {
-      importBtn.disabled = false
-      status.textContent = `Failed: ${cleanErrorMessage(err, 'Import failed')}`
+      this.setCardState(card, 'import')
+      this.setCardMessage(card, `Failed: ${cleanErrorMessage(err, 'Import failed')}`)
+    } finally {
+      unsubscribe?.()
     }
   }
 
-  // yt-dlp downloads (audio extraction + optional trim to the 10-minute
-  // cap) take real wall-clock time, unlike Freesound's near-instant preview
-  // download - reuses library:addSoundFromUrl's own progress channel
-  // (the same one AddLinkDialog.js drives) to show real status instead of a
-  // bare spinner. Only one YouTube import can run at a time (the progress
-  // channel is a single global stream with no per-request id to route by -
-  // same constraint AddLinkDialog's own single-download-at-a-time dialog
-  // already has), so every other YouTube Import button is disabled while
-  // one is in flight; Freesound imports are unaffected since they use a
-  // separate channel and finish fast enough to not need this guard.
-  async importYouTubeResult(sound, card) {
-    // A second click used to hit `if (importing) return` and do nothing at
-    // all - no message, no disabled button on cards loaded since the import
-    // started. Say what's happening and point at the card that's busy.
+  // yt-dlp downloads take real wall-clock time, unlike Freesound's
+  // near-instant preview download - reuses library:addSoundFromUrl's own
+  // progress channel to show real status. Only one YouTube import can run
+  // at a time (the progress channel is a single global stream with no
+  // per-request id), so a second click says so and points at the busy card.
+  async importYouTubeResult(card) {
     if (this.youtubeImporting) {
-      const status = card.querySelector('.browse-card-status')
-      status.textContent = 'Another import is running — one at a time.'
+      this.setCardMessage(card, 'Another import is running. One at a time.')
       this.importingCard?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
       return
     }
+    const sound = card._sound
     this.youtubeImporting = true
     this.importingCard = card
-    const importBtn = card.querySelector('.browse-import-btn')
-    const status = card.querySelector('.browse-card-status')
-    const otherYoutubeButtons = this.els.results.querySelectorAll('[data-source="youtube"] .browse-import-btn')
-    for (const btn of otherYoutubeButtons) btn.disabled = true
-    status.textContent = `Starting… (${maxMinutesLabel(this.settings.maxMinutes).toLowerCase()}, ${estimateImportWait(this.settings.maxMinutes)})`
-
-    // A download that runs for minutes has to be interruptible, so the
-    // Import button becomes Cancel for as long as this one runs.
-    const cancelBtn = this.showCancelButton(card, importBtn)
+    this.setCardMessage(card, '')
+    const { maxMinutes } = this.settings
+    this.setCardState(card, 'busy', { message: `Starting… (${maxMinutesLabel(maxMinutes).toLowerCase()}, ${estimateImportWait(maxMinutes)})` })
 
     const unsubscribe = this.api.library.onAddSoundFromUrlProgress((update) => {
       if (!update) return
       if (update.type === 'progress') {
-        // The app now reports a real percent for the whole download (it used
-        // to jump straight from nothing to 100% at the very end), so this
-        // line actually moves while a long video comes down.
-        status.textContent = `Downloading… ${Math.round(update.percent)}%`
+        const percent = Math.round(update.percent)
+        this.setCardProgress(card, { message: `Downloading… ${percent}%`, percent })
       } else if (update.message) {
-        status.textContent = update.message
+        this.setCardProgress(card, { message: update.message })
       }
     })
 
     try {
       await this.api.library.addSoundFromUrl({ url: sound.url, name: sound.title, maxSeconds: this.importMaxSeconds() })
-      status.textContent = 'Added ✓'
+      this.inLibrary.add(card.dataset.key)
+      this.setCardState(card, 'added')
       document.dispatchEvent(new CustomEvent('library:linked'))
     } catch (err) {
-      status.textContent = cleanErrorMessage(err, 'Import failed.')
-      importBtn.disabled = false
+      this.setCardState(card, 'import')
+      this.setCardMessage(card, cleanErrorMessage(err, 'Import failed.'))
     } finally {
       unsubscribe()
-      cancelBtn.remove()
-      importBtn.classList.remove('hidden')
       this.youtubeImporting = false
       this.importingCard = null
-      for (const btn of otherYoutubeButtons) {
-        // A card that already imported keeps its button disabled - re-enabling
-        // every other button used to offer "Import" again next to an "Added ✓".
-        if (btn !== importBtn && !btn.dataset.imported) btn.disabled = false
-      }
-      if (status.textContent === 'Added ✓') importBtn.dataset.imported = 'true'
     }
-  }
-
-  // Swaps a running card's Import button for a Cancel one. Returns the
-  // button so the caller can take it away again when the import settles.
-  showCancelButton(card, importBtn) {
-    const cancelBtn = document.createElement('button')
-    cancelBtn.type = 'button'
-    cancelBtn.className = 'browse-cancel-btn btn btn-icon-text'
-    cancelBtn.textContent = 'Cancel'
-    cancelBtn.addEventListener('click', () => {
-      cancelBtn.disabled = true
-      cancelBtn.textContent = 'Cancelling…'
-      this.api.library.cancelAddSoundFromUrl?.().catch(() => {})
-    })
-    importBtn.classList.add('hidden')
-    importBtn.after(cancelBtn)
-    return cancelBtn
   }
 
   renderCard(sound, source) {
     const card = document.createElement('div')
-    card.className = 'browse-card'
+    card.className = 'bs-tile'
     card.dataset.source = source
+    card.dataset.key = resultKey(sound, source)
+    card._sound = sound
+    const title = source === 'freesound' ? sound.name : sound.title
 
-    if (source === 'youtube' && sound.thumbnailUrl) {
-      const thumb = document.createElement('img')
-      thumb.className = 'browse-card-thumb'
-      thumb.src = sound.thumbnailUrl
-      thumb.alt = ''
-      thumb.loading = 'lazy'
-      card.appendChild(thumb)
-    }
-
-    const header = document.createElement('div')
-    header.className = 'browse-card-header'
-
+    // The preview button sits where the Mixer card's knob does. A YouTube
+    // result has no in-app preview, so its button shows the video's
+    // thumbnail and opens the video in the browser.
+    let pv
     if (source === 'freesound') {
-      const previewBtn = document.createElement('button')
-      previewBtn.type = 'button'
-      previewBtn.className = 'browse-preview-btn'
-      previewBtn.title = 'Preview'
-      previewBtn.textContent = '▶'
-      previewBtn.addEventListener('click', () => this.togglePreview(sound, previewBtn))
-      header.appendChild(previewBtn)
+      pv = document.createElement('button')
+      pv.type = 'button'
+      pv.title = 'Preview'
+      pv.setAttribute('aria-pressed', 'false')
+      pv.addEventListener('click', () => this.togglePreview(sound, card))
     } else {
-      // No cheap streaming preview for a YouTube result - opens the real
-      // video externally instead (the app's window-open handler routes any
-      // target="_blank" link to the OS browser via shell.openExternal).
-      const watchLink = document.createElement('a')
-      watchLink.className = 'browse-preview-btn'
-      watchLink.title = 'Watch on YouTube'
-      watchLink.textContent = '↗'
-      watchLink.href = sound.url
-      watchLink.target = '_blank'
-      watchLink.rel = 'noopener noreferrer'
-      header.appendChild(watchLink)
+      pv = document.createElement('a')
+      pv.href = sound.url
+      pv.target = '_blank'
+      pv.rel = 'noopener noreferrer'
+      pv.title = 'Watch on YouTube'
+      if (sound.thumbnailUrl) {
+        pv.classList.add('bs-thumb')
+        pv.style.backgroundImage = `url("${String(sound.thumbnailUrl).replace(/"/g, '%22')}")`
+      }
     }
+    pv.classList.add('bs-pv')
+    pv.setAttribute('aria-label', `${source === 'freesound' ? 'Preview' : 'Watch'} ${title}`)
+    pv.innerHTML = icon('play', 24)
 
     // Freesound's name links out to the sound's real Freesound page (owner
-    // inbox, 2026-09-16); YouTube's own external link already lives in the
-    // "Watch ↗" button in the header above, so its name stays plain text.
-    const name = document.createElement(source === 'freesound' ? 'a' : 'span')
-    name.className = 'browse-card-name'
-    if (source === 'freesound') {
-      name.classList.add('browse-card-name-link')
+    // inbox, 2026-09-16); the description shows on hover, as the card has no
+    // room for it.
+    const name = document.createElement(source === 'freesound' && sound.pageUrl ? 'a' : 'div')
+    name.className = 'bs-nm'
+    name.textContent = title
+    name.title = sound.description ? `${title}\n\n${sound.description}` : title
+    if (name.tagName === 'A') {
       name.href = sound.pageUrl
       name.target = '_blank'
       name.rel = 'noopener noreferrer'
-      name.title = sound.name
-      const label = document.createElement('span')
-      label.className = 'browse-card-name-text'
-      label.textContent = sound.name
-      const icon = document.createElement('span')
-      icon.className = 'browse-link-icon'
-      icon.innerHTML = LINK_ICON_SVG
-      name.append(label, icon)
-    } else {
-      name.textContent = sound.title
-      name.title = sound.title
     }
 
-    const badge = document.createElement('span')
-    badge.className = 'browse-card-badge'
-    badge.textContent = source === 'freesound' ? 'Freesound' : 'YouTube'
-
-    header.append(name, badge)
+    const by = document.createElement('div')
+    by.className = 'bs-meta'
+    by.textContent = `by ${source === 'freesound' ? sound.username : sound.channel}`
 
     const meta = document.createElement('div')
-    meta.className = 'browse-card-meta'
-    if (source === 'freesound') {
-      const ratingPart = sound.numRatings > 0 && sound.avgRating != null ? ` · ★${sound.avgRating.toFixed(1)} (${sound.numRatings})` : ''
-      meta.textContent = `by ${sound.username} · ${formatDuration(sound.durationSeconds)} · ${licenseLabel(sound.license)}${ratingPart}`
-    } else {
-      meta.textContent = `${sound.channel} · ${formatDuration(sound.durationSeconds)}`
+    meta.className = 'bs-meta'
+    const rating = source === 'freesound' && sound.numRatings > 0 && sound.avgRating != null ? ` · ★${sound.avgRating.toFixed(1)}` : ''
+    meta.textContent = `${formatDuration(sound.durationSeconds)} · ${source === 'freesound' ? licenseLabel(sound.license) : 'YouTube'}${rating}`
+    if (rating) meta.title = `${sound.avgRating.toFixed(1)} stars from ${sound.numRatings} rating${sound.numRatings === 1 ? '' : 's'}`
+
+    const chips = document.createElement('div')
+    chips.className = 'bs-chips'
+    const tags = sound.tags ?? []
+    for (const tag of tags.slice(0, CARD_TAGS)) {
+      const chip = document.createElement('span')
+      chip.className = 'bs-chip'
+      chip.textContent = tag
+      chips.appendChild(chip)
+    }
+    if (tags.length > CARD_TAGS) {
+      const more = document.createElement('span')
+      more.className = 'bs-chip bs-more'
+      more.textContent = `+${tags.length - CARD_TAGS}`
+      more.title = tags.slice(CARD_TAGS).join(', ')
+      chips.appendChild(more)
     }
 
-    card.append(header, meta)
+    const state = document.createElement('div')
+    state.className = 'bs-state'
+    const msg = document.createElement('div')
+    msg.className = 'bs-meta bs-msg hidden'
 
-    if (sound.description) {
-      const desc = document.createElement('p')
-      desc.className = 'browse-card-desc'
-      desc.textContent = sound.description
-      desc.title = sound.description
-      card.appendChild(desc)
-    }
-
-    if (sound.tags?.length > 0) {
-      const tagsEl = document.createElement('div')
-      tagsEl.className = 'browse-card-tags'
-      for (const tag of sound.tags.slice(0, MAX_TAGS_SHOWN)) {
-        const pill = document.createElement('span')
-        pill.className = 'browse-tag'
-        pill.textContent = tag
-        tagsEl.appendChild(pill)
-      }
-      if (sound.tags.length > MAX_TAGS_SHOWN) {
-        const more = document.createElement('span')
-        more.className = 'browse-tag browse-tag-more'
-        more.textContent = `+${sound.tags.length - MAX_TAGS_SHOWN}`
-        tagsEl.appendChild(more)
-      }
-      card.appendChild(tagsEl)
-    }
-
-    const footer = document.createElement('div')
-    footer.className = 'browse-card-footer'
-    const status = document.createElement('span')
-    status.className = 'browse-card-status'
-    const importBtn = document.createElement('button')
-    importBtn.type = 'button'
-    importBtn.className = 'browse-import-btn btn btn-icon-text'
-    importBtn.textContent = 'Import'
-    importBtn.addEventListener('click', () =>
-      source === 'freesound' ? this.importResult(sound, card) : this.importYouTubeResult(sound, card)
-    )
-    footer.append(status, importBtn)
-    card.appendChild(footer)
-
+    card.append(pv, name, by, meta, chips, state, msg)
+    if (source === 'youtube') card.dataset.url = sound.url
+    this.setCardState(card, this.inLibrary.has(card.dataset.key) ? 'have' : 'import')
     return card
   }
 }

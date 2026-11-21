@@ -88,10 +88,12 @@ a.bs-nm:hover { text-decoration: underline; }
 .bs-msg.hidden { display: none; }
 .bs-sentinel { height: 1px; }
 
-/* The preview bar stays at the bottom of the tab while the results scroll. */
+/* The preview bar always shows, stuck to the bottom of the tab while the results scroll. */
 .bs-pvbar { position: sticky; bottom: 0; margin-top: auto; display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-radius: 12px; background: var(--surface-alt); flex: none; z-index: 1; }
-.bs-pvbar.hidden { display: none; }
 .bs-pvbar b { width: 224px; font-weight: 600; white-space: nowrap; }
+.bs-pvbar b.bs-idle { color: var(--text-dim); font-weight: 400; }
+.bs-pvbar .bs-fader:disabled { cursor: default; opacity: 0.5; }
+.bs-pvbar .bs-b:disabled { opacity: 0.5; cursor: default; }
 .bs-elli { overflow: hidden; text-overflow: ellipsis; }
 .bs-pvbar .bs-fader { flex: 1; }
 .bs-pvbar > .bs-fader { min-width: 80px; }

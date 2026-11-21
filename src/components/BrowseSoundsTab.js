@@ -15,7 +15,9 @@
 // `browse-first` and `browse-fail` screens (Global Management
 // design-system/mocks/noctivago-desktop.client.js). Results are the same
 // centered card as the Mixer, with a preview button where the knob sits; the
-// preview bar sits at the bottom of the tab instead of the shared sticky bar;
+// preview bar sits at the bottom of the tab instead of the shared sticky bar,
+// always visible (owner, 2026-11-21): idle until a sound plays, then the last
+// sound stays current and Play resumes it;
 // how much of a video to import and the YouTube sign-in sit on the search bar
 // (they still live in Settings → Browse Sounds too, same values).
 //
@@ -64,7 +66,10 @@ const COOKIE_BROWSERS = [
 // Tags on a card: one line, like the Mixer card's chips.
 const CARD_TAGS = Math.min(3, MAX_TAGS_SHOWN)
 
-const escapeHtml = (text) => String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+// The bar's name slot before any sound has played.
+const NO_PREVIEW_NAME = 'Nothing playing'
+
+const escapeHtml =(text) => String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
 
 export default class BrowseSoundsPlugin {
   constructor(app) {
@@ -107,7 +112,7 @@ export default class BrowseSoundsPlugin {
       title: 'Browse Sounds',
       mount: (container) => this.mount(container),
       onShow: () => this.refreshLibrary(),
-      onHide: () => this.stopPreview()
+      onHide: () => this.pausePreview()
     })
     // A plugin's options belong to the plugin, not to the app's own Settings
     // → Library page (owner feedback, 2026-09-20).
@@ -208,10 +213,10 @@ export default class BrowseSoundsPlugin {
           <p class="bs-hint" id="browse-length-hint"></p>
         </div>
 
-        <div id="browse-pvbar" class="bs-pvbar hidden">
-          <button id="browse-pv-play" class="bs-b bs-play bs-sm" type="button" aria-label="Pause preview">${PAUSE_ICON_SVG}</button>
-          <b id="browse-pv-name" class="bs-elli"></b>
-          <input id="browse-pv-seek" class="bs-fader" type="range" min="0" max="1000" value="0" style="--p:0%" aria-label="Drag to seek" />
+        <div id="browse-pvbar" class="bs-pvbar">
+          <button id="browse-pv-play" class="bs-b bs-play bs-sm" type="button" aria-label="Play preview" disabled>${PLAY_ICON_SVG}</button>
+          <b id="browse-pv-name" class="bs-elli bs-idle">${NO_PREVIEW_NAME}</b>
+          <input id="browse-pv-seek" class="bs-fader" type="range" min="0" max="1000" value="0" style="--p:0%" aria-label="Drag to seek" disabled />
           <span id="browse-pv-time" class="bs-num">0:00 / 0:00</span>
           <span class="bs-dim">${icon('volume-2')}</span>
           <div class="bs-vol"><input id="browse-pv-volume" class="bs-fader" type="range" min="0" max="100" value="100" style="--p:100%" aria-label="Preview volume" /></div>
@@ -328,7 +333,7 @@ export default class BrowseSoundsPlugin {
   }
 
   showFailure(failedKeys) {
-    this.stopPreview()
+    this.pausePreview()
     this.els.failTitle.textContent = unreachableTitle(failedKeys)
     this.els.failText.textContent = 'No connection. Your own sounds still work.'
     this.showScreen('fail')
@@ -340,15 +345,7 @@ export default class BrowseSoundsPlugin {
   // preview drives it; YouTube results have no in-app preview.
   wirePreviewBar() {
     const { pvPlay, pvSeek, pvVolume } = this.els
-    pvPlay.addEventListener('click', () => {
-      const audio = this.previewAudio
-      if (!audio) return
-      if (audio.paused) audio.play().then(() => this.applyPreviewPlayState(true)).catch(() => this.stopPreview())
-      else {
-        audio.pause()
-        this.applyPreviewPlayState(false)
-      }
-    })
+    pvPlay.addEventListener('click', () => this.toggleCurrentPreview())
     pvSeek.addEventListener('pointerdown', () => (this.seekDragging = true))
     pvSeek.addEventListener('pointerup', () => (this.seekDragging = false))
     pvSeek.addEventListener('input', () => {
@@ -381,6 +378,7 @@ export default class BrowseSoundsPlugin {
   }
 
   applyPreviewPlayState(playing) {
+    this.previewCard?.classList.toggle('bs-on', playing)
     const btn = this.previewCard?.querySelector('.bs-pv')
     if (btn) {
       btn.innerHTML = icon(playing ? 'pause' : 'play', 24)
@@ -421,7 +419,7 @@ export default class BrowseSoundsPlugin {
 
   clearSourceCards(key) {
     for (const el of this.els.results.querySelectorAll(`[data-source="${key}"]`)) {
-      if (el === this.previewCard) this.stopPreview()
+      if (el === this.previewCard) this.pausePreview()
       el.remove()
     }
   }
@@ -480,7 +478,7 @@ export default class BrowseSoundsPlugin {
   search() {
     const query = this.els.query.value.trim()
     if (!query) return
-    this.stopPreview()
+    this.pausePreview()
     this.query = query
     this.sort = this.els.sort.value
     this.requestId += 1
@@ -619,6 +617,16 @@ export default class BrowseSoundsPlugin {
     setStatus(failed.length ? this.sources[failed[0]].error : `No results for "${this.query}".`)
   }
 
+  // Pauses but keeps the sound as the bar's current one, so Play resumes it
+  // (owner, 2026-11-21: the bar never goes away). Leaving the tab, a new
+  // search and a finished sound all end up here.
+  pausePreview() {
+    this.previewAudio?.pause()
+    this.applyPreviewPlayState(false)
+  }
+
+  // Lets go of the sound completely: the bar goes back to "Nothing playing".
+  // Only for a sound that fails, a different sound taking over, and unload.
   stopPreview() {
     if (this.previewAudio) {
       this.previewAudio.pause()
@@ -626,16 +634,28 @@ export default class BrowseSoundsPlugin {
       this.previewAudio = null
     }
     this.applyPreviewPlayState(false)
-    this.previewCard?.classList.remove('bs-on')
     this.previewCard = null
     this.previewSound = null
-    this.els.pvbar?.classList.add('hidden')
+    this.renderPreviewBar()
     this.updatePreviewProgress()
   }
 
+  // The bar always shows: the current sound's name, or an idle bar with Play
+  // and the progress bar off until a sound has been picked. Volume always works.
+  renderPreviewBar() {
+    const { pvName, pvPlay, pvSeek } = this.els
+    if (!pvName) return
+    const sound = this.previewSound
+    pvName.textContent = sound ? sound.name : NO_PREVIEW_NAME
+    pvName.title = sound ? sound.name : ''
+    pvName.classList.toggle('bs-idle', !sound)
+    pvPlay.disabled = !sound
+    pvSeek.disabled = !sound
+  }
+
   togglePreview(sound, card) {
-    if (this.previewCard === card) {
-      this.stopPreview()
+    if (this.previewCard === card && this.previewAudio) {
+      this.toggleCurrentPreview()
       return
     }
     this.stopPreview()
@@ -643,17 +663,28 @@ export default class BrowseSoundsPlugin {
     audio.volume = this.previewVolume
     audio.addEventListener('loadedmetadata', () => this.updatePreviewProgress())
     audio.addEventListener('timeupdate', () => this.updatePreviewProgress())
-    audio.addEventListener('ended', () => this.stopPreview())
+    audio.addEventListener('ended', () => {
+      audio.currentTime = 0
+      this.pausePreview()
+      this.updatePreviewProgress()
+    })
     audio.addEventListener('error', () => this.stopPreview())
     audio.play().catch(() => this.stopPreview())
     this.previewAudio = audio
     this.previewCard = card
     this.previewSound = sound
-    card.classList.add('bs-on')
     this.applyPreviewPlayState(true)
-    this.els.pvName.textContent = sound.name
-    this.els.pvName.title = sound.name
-    this.els.pvbar.classList.remove('hidden')
+    this.renderPreviewBar()
+    this.updatePreviewProgress()
+  }
+
+  // Play/Pause on whatever sound the bar holds (the bar's button and the
+  // card's own button both land here).
+  toggleCurrentPreview() {
+    const audio = this.previewAudio
+    if (!audio) return
+    if (audio.paused) audio.play().then(() => this.applyPreviewPlayState(true)).catch(() => this.stopPreview())
+    else this.pausePreview()
   }
 
   // A card's bottom slot: Import, In library / Added, or a running download.
